@@ -1,0 +1,93 @@
+--[[DELTA UNIVERSAL TRANSLATOR V2 (2025 UPDATED)- Fixes: Execution errors, API failures, and GUI visibility- Compatibility: Delta, Fluxus, Vega X (Mobile)]]local Players = game:GetService("Players")local HttpService = game:GetService("HttpService")local TextChatService = game:GetService("TextChatService")local LocalPlayer = Players.LocalPlayer-- Configurationlocal Config = {Enabled = true,Target = "en", -- Set to your language (en, es, fr, pt, etc.)Debounce = false,Cache = {}}-- Mobile-Friendly GUI Constructionlocal function CreateUI()local sg = Instance.new("ScreenGui")sg.Name = "UniversalTransV2"sg.ResetOnSpawn = false-- Use PlayerGui for better compatibility if CoreGui is restrictedsg.Parent = LocalPlayer:WaitForChild("PlayerGui")local Main = Instance.new("Frame")
+Main.Size = UDim2.new(0, 150, 0, 100)
+Main.Position = UDim2.new(0.05, 0, 0.2, 0)
+Main.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+Main.Active = true
+Main.Draggable = true
+Main.Parent = sg
+
+local Corner = Instance.new("UICorner")
+Corner.CornerRadius = UDim.new(0, 10)
+Corner.Parent = Main
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.Text = "Translator V2"
+Title.TextColor3 = Color3.new(1, 1, 1)
+Title.BackgroundTransparency = 1
+Title.Font = Enum.Font.GothamBold
+Title.Parent = Main
+
+local Toggle = Instance.new("TextButton")
+Toggle.Size = UDim2.new(0.8, 0, 0, 30)
+Toggle.Position = UDim2.new(0.1, 0, 0.4, 0)
+Toggle.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+Toggle.Text = "Enabled: ON"
+Toggle.TextColor3 = Color3.new(1, 1, 1)
+Toggle.Parent = Main
+
+local Input = Instance.new("TextBox")
+Input.Size = UDim2.new(0.8, 0, 0, 25)
+Input.Position = UDim2.new(0.1, 0, 0.75, 0)
+Input.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+Input.Text = Config.Target
+Input.PlaceholderText = "en/es/fr"
+Input.TextColor3 = Color3.new(1, 1, 1)
+Input.Parent = Main
+
+Toggle.MouseButton1Click:Connect(function()
+    Config.Enabled = not Config.Enabled
+    Toggle.Text = Config.Enabled and "Enabled: ON" or "Enabled: OFF"
+    Toggle.BackgroundColor3 = Config.Enabled and Color3.fromRGB(0, 170, 255) or Color3.fromRGB(150, 50, 50)
+end)
+
+Input.FocusLost:Connect(function()
+    Config.Target = Input.Text:lower()
+end)
+end-- Core Translation Logic with Exponential Backofflocal function Translate(text)if not Config.Enabled or text == "" or Config.Cache[text] thenreturn Config.Cache[text]endlocal url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl="..Config.Target.."&dt=t&q="..HttpService:UrlEncode(text)
+local response
+local success = false
+local retries = 0
+
+while not success and retries < 3 do
+    success, response = pcall(function()
+        return game:HttpGet(url)
+    end)
+    if not success then 
+        retries = retries + 1
+        task.wait(1) 
+    end
+end
+
+if success and response then
+    local data = HttpService:JSONDecode(response)
+    if data and data[1] then
+        local res = ""
+        for _, v in pairs(data[1]) do
+            res = res .. v[1]
+        end
+        Config.Cache[text] = res
+        return res
+    end
+end
+return nil
+end-- Message Handlinglocal function OnMessage(sender, text)if sender == LocalPlayer.Name then return endtask.spawn(function()
+    local translated = Translate(text)
+    if translated and translated:lower() ~= text:lower() then
+        -- Use the CoreGui System Message to display translation
+        game:GetService("StarterGui"):SetCore("ChatMakeSystemMessage", {
+            Text = "["..sender.."]: " .. translated,
+            Color = Color3.fromRGB(0, 255, 150),
+            Font = Enum.Font.GothamMedium,
+            TextSize = 16
+        })
+    end
+end)
+end-- Hooking Both Chat Systemstask.spawn(function()-- 1. TextChatService (Modern)TextChatService.MessageReceived:Connect(function(msg)if msg.TextSource thenOnMessage(msg.TextSource.Name, msg.Text)endend)-- 2. Legacy Chat (Old)
+local LegacyEvents = game:GetService("ReplicatedStorage"):WaitForChild("DefaultChatSystemChatEvents", 5)
+if LegacyEvents then
+    LegacyEvents:WaitForChild("OnMessageDoneFiltering").OnClientEvent:Connect(function(data)
+        OnMessage(data.FromSpeaker, data.Message)
+    end)
+end
+end)CreateUI()print("Translator V2 Loaded - Use the GUI to set language.")
