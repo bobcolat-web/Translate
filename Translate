@@ -1,0 +1,465 @@
+--[[
+    All-in-One Chat Translator with UI (Optimized for Delta & Mobile)
+    - Fixes the API endpoint to a stable, cookie-less Google Translate URL.
+    - Replaces buggy CoreGui chat scraping with a reliable Namecall Hook.
+    - Implements custom mobile touch-dragging logic.
+    - Enlarged touch-targets for mobile users.
+--]]
+
+if not game:IsLoaded() then game.Loaded:Wait() end
+repeat task.wait(.06) until game:GetService("Players").LocalPlayer
+
+-- Services
+local Http = game:GetService("HttpService")
+local Players = game:GetService("Players")
+local TCS = game:GetService("TextChatService")
+local CoreGui = game:GetService("CoreGui")
+local UserInputService = game:GetService("UserInputService")
+local LP = Players.LocalPlayer
+
+-- Translator State
+local isTranslatorActive = false
+local isJumbleActive = false
+local yourLanguage = "en"
+local targetLanguage = nil
+
+local languageCategories = {
+    {
+        Name = "Global & Constructed",
+        Languages = {
+            ["English (US/UK)"] = "en", ["Esperanto"] = "eo", ["Latin"] = "la"
+        }
+    },
+    {
+        Name = "African Languages",
+        Languages = {
+            ["Afrikaans"] = "af", ["Amharic"] = "am", ["Hausa"] = "ha", ["Igbo"] = "ig", 
+            ["Malagasy"] = "mg", ["Sesotho"] = "st", ["Shona"] = "sn", ["Somali"] = "so", 
+            ["Swahili"] = "sw", ["Xhosa"] = "xh", ["Yoruba"] = "yo", ["Zulu"] = "zu"
+        }
+    },
+    {
+        Name = "Asian Languages",
+        Languages = {
+            ["Armenian"] = "hy", ["Azerbaijani"] = "az", ["Bengali"] = "bn", ["Burmese"] = "my", 
+            ["Chinese"] = "zh-cn", ["Georgian"] = "ka", ["Gujarati"] = "gu", ["Hindi"] = "hi", 
+            ["Hmong"] = "hmn", ["Indonesian"] = "id", ["Japanese"] = "ja", ["Javanese"] = "jw", 
+            ["Kannada"] = "kn", ["Kazakh"] = "kk", ["Khmer"] = "km", ["Korean"] = "ko", 
+            ["Kurdish"] = "ku", ["Kyrgyz"] = "ky", ["Lao"] = "lo", ["Malay"] = "ms", 
+            ["Malayalam"] = "ml", ["Marathi"] = "mr", ["Mongolian"] = "mn", ["Nepali"] = "ne", 
+            ["Pashto"] = "ps", ["Punjabi"] = "pa", ["Sindhi"] = "sd", ["Sinhala"] = "si", 
+            ["Sundanese"] = "su", ["Tajik"] = "tg", ["Tamil"] = "ta", ["Telugu"] = "te", 
+            ["Thai"] = "th", ["Urdu"] = "ur", ["Uzbek"] = "uz", ["Vietnamese"] = "vi"
+        }
+    },
+    {
+        Name = "European Languages",
+        Languages = {
+            ["Albanian"] = "sq", ["Basque"] = "eu", ["Belarusian"] = "be", ["Bosnian"] = "bs", 
+            ["Bulgarian"] = "bg", ["Catalan"] = "ca", ["Corsican"] = "co", ["Croatian"] = "hr", 
+            ["Czech"] = "cs", ["Danish"] = "da", ["Dutch"] = "nl", ["Estonian"] = "et", 
+            ["Finnish"] = "fi", ["French"] = "fr", ["Frisian"] = "fy", ["Galician"] = "gl", 
+            ["German"] = "de", ["Greek"] = "el", ["Hungarian"] = "hu", ["Icelandic"] = "is", 
+            ["Irish"] = "ga", ["Italian"] = "it", ["Latvian"] = "lv", ["Lithuanian"] = "lt", 
+            ["Luxembourgish"] = "lb", ["Macedonian"] = "mk", ["Maltese"] = "mt", ["Norwegian"] = "no", 
+            ["Polish"] = "pl", ["Portuguese"] = "pt", ["Romanian"] = "ro", ["Russian"] = "ru", 
+            ["Scots Gaelic"] = "gd", ["Serbian"] = "sr", ["Slovak"] = "sk", ["Slovenian"] = "sl", 
+            ["Spanish"] = "es", ["Swedish"] = "sv", ["Ukrainian"] = "uk", ["Welsh"] = "cy"
+        }
+    },
+    {
+        Name = "Middle Eastern",
+        Languages = {
+            ["Arabic"] = "ar", ["Hebrew"] = "iw", ["Persian"] = "fa", ["Turkish"] = "tr", ["Yiddish"] = "yi"
+        }
+    },
+    {
+        Name = "North & Central American",
+        Languages = {
+            ["Haitian Creole"] = "ht"
+        }
+    },
+    {
+        Name = "Oceanian Languages",
+        Languages = {
+            ["Cebuano"] = "ceb", ["Filipino"] = "tl", ["Hawaiian"] = "haw", ["Maori"] = "mi", ["Samoan"] = "sm"
+        }
+    }
+}
+
+local languages = {}
+local langCodesArray = {}
+for _, categoryData in ipairs(languageCategories) do
+    for langName, langCode in pairs(categoryData.Languages) do
+        languages[langName] = langCode
+        table.insert(langCodesArray, langCode)
+    end
+end
+
+--region Translation API Functions (Updated for Delta/Mobile reliably)
+local requestFunc = request or http_request or (syn and syn.request)
+
+local function translate(text, target, source)
+    source = source or "auto"
+    local url = string.format("https://translate.googleapis.com/translate_a/single?client=gtx&sl=%s&tl=%s&dt=t&q=%s", source, target, Http:UrlEncode(text))
+    
+    if not requestFunc then return text, "auto" end
+
+    local success, response = pcall(requestFunc, {
+        Url = url,
+        Method = "GET"
+    })
+
+    if success and response and response.StatusCode == 200 then
+        local decoded = Http:JSONDecode(response.Body)
+        local translatedText = ""
+        for _, block in ipairs(decoded[1]) do
+            translatedText = translatedText .. (block[1] or "")
+        end
+        local detectedLang = decoded[2] or "auto"
+        return translatedText, detectedLang
+    end
+    return text, "auto"
+end
+--endregion
+
+--region Chat System Interaction
+local function sys(msg)
+    local chans = TCS:WaitForChild("TextChannels", 5)
+    if not chans then return end
+    local c = chans:FindFirstChild("RBXSystem") or chans:FindFirstChild("RBXGeneral")
+    if c and c.DisplaySystemMessage then
+        c:DisplaySystemMessage(msg)
+    end
+end
+
+local function handleOutgoing(rawMessage)
+    if rawMessage:sub(1, 1) == "/" then return rawMessage end
+
+    if isJumbleActive then
+        local words = {}
+        for word in rawMessage:gmatch("%S+") do table.insert(words, word) end
+        
+        local translatedWords = {}
+        for _, word in ipairs(words) do
+            local randomLangCode = langCodesArray[math.random(#langCodesArray)]
+            local translatedWord = translate(word, randomLangCode, "auto")
+            table.insert(translatedWords, translatedWord)
+        end
+        return table.concat(translatedWords, " ")
+    elseif isTranslatorActive and targetLanguage then
+        return translate(rawMessage, targetLanguage, "auto")
+    end
+
+    return rawMessage
+end
+
+-- Hook game Namecall to cleanly intercept TextChannel:SendAsync (Bypasses UI entirely)
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+    local method = getnamecallmethod()
+    if method == "SendAsync" and typeof(self) == "Instance" and self.ClassName == "TextChannel" and not checkcaller() then
+        local args = {...}
+        local msg = args[1]
+        
+        if type(msg) == "string" then
+            local modifiedMsg = handleOutgoing(msg)
+            args[1] = modifiedMsg
+        end
+        
+        return oldNamecall(self, unpack(args))
+    end
+    return oldNamecall(self, ...)
+end)
+
+TCS.MessageReceived:Connect(function(msg)
+    if not msg.TextSource or msg.TextSource.UserId == LP.UserId then return end
+    
+    local userId = msg.TextSource.UserId
+    local player = Players:GetPlayerByUserId(userId)
+    local displayName = player and player.DisplayName or tostring(userId)
+    local userName = player and player.Name or tostring(userId)
+    local nameString = (displayName == userName) and ("@" .. userName) or (displayName .. " (@" .. userName .. ")")
+    
+    -- Translate incoming to English asynchronously
+    task.spawn(function()
+        local text, detectedLang = translate(msg.Text, yourLanguage, "auto")
+        if text and text ~= "" and text ~= msg.Text then
+            local langTag = detectedLang and detectedLang ~= "" and detectedLang:upper() or "AUTO"
+            sys("(" .. langTag .. ") [" .. nameString .. "]: " .. text)
+        end
+    end)
+end)
+--endregion
+
+--region UI Creation
+-- If an old UI exists, destroy it.
+if CoreGui:FindFirstChild("DeltaTranslatorUI") then
+    CoreGui.DeltaTranslatorUI:Destroy()
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "DeltaTranslatorUI"
+screenGui.Parent = CoreGui
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Name = "MainFrame"
+mainFrame.Parent = screenGui
+mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+mainFrame.BorderColor3 = Color3.fromRGB(80, 80, 80)
+mainFrame.BorderSizePixel = 1
+mainFrame.Position = UDim2.new(0, 50, 0, 50)
+mainFrame.Size = UDim2.new(0, 300, 0, 35)
+mainFrame.ClipsDescendants = true
+mainFrame.Active = true
+
+-- Mobile-friendly drag logic
+local dragging, dragInput, dragStart, startPos
+mainFrame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = mainFrame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+mainFrame.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local delta = input.Position - dragStart
+        mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Name = "Title"
+titleLabel.Parent = mainFrame
+titleLabel.BackgroundTransparency = 1
+titleLabel.Position = UDim2.new(0, 10, 0, 0)
+titleLabel.Size = UDim2.new(0, 150, 0, 35)
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.Text = "🌍 Translator"
+titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+titleLabel.TextSize = 16
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+local toggleButton = Instance.new("TextButton")
+toggleButton.Name = "ToggleButton"
+toggleButton.Parent = mainFrame
+toggleButton.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+toggleButton.Size = UDim2.new(0, 30, 0, 25)
+toggleButton.Position = UDim2.new(1, -35, 0.5, -12.5)
+toggleButton.Font = Enum.Font.GothamBold
+toggleButton.Text = "+"
+toggleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleButton.TextSize = 18
+toggleButton.AutoButtonColor = true
+
+local scrollFrame = Instance.new("ScrollingFrame")
+scrollFrame.Name = "ScrollFrame"
+scrollFrame.Parent = mainFrame
+scrollFrame.BackgroundTransparency = 1
+scrollFrame.Position = UDim2.new(0, 0, 0, 35)
+scrollFrame.Size = UDim2.new(1, 0, 1, -35)
+scrollFrame.Visible = false
+scrollFrame.AutomaticCanvasSize = Enum.AutomaticSize.Y
+scrollFrame.ScrollBarThickness = 5
+
+local listLayout = Instance.new("UIListLayout")
+listLayout.Parent = scrollFrame
+listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+listLayout.Padding = UDim.new(0, 5)
+
+local controlFrame = Instance.new("Frame")
+controlFrame.Parent = scrollFrame
+controlFrame.BackgroundTransparency = 1
+controlFrame.Size = UDim2.new(1, 0, 0, 35)
+controlFrame.LayoutOrder = 1
+
+local controlGrid = Instance.new("UIGridLayout")
+controlGrid.Parent = controlFrame
+controlGrid.CellPadding = UDim2.new(0, 8, 0, 8)
+controlGrid.CellSize = UDim2.new(0, 135, 0, 30)
+controlGrid.HorizontalAlignment = Enum.HorizontalAlignment.Center
+controlGrid.SortOrder = Enum.SortOrder.LayoutOrder
+
+local stopButton = Instance.new("TextButton")
+stopButton.Parent = controlFrame
+stopButton.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+stopButton.Font = Enum.Font.GothamBold
+stopButton.Text = "Stop Translate"
+stopButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+stopButton.TextSize = 14
+stopButton.LayoutOrder = 1
+
+local jumbleButton = Instance.new("TextButton")
+jumbleButton.Parent = controlFrame
+jumbleButton.BackgroundColor3 = Color3.fromRGB(120, 60, 180)
+jumbleButton.Font = Enum.Font.GothamBold
+jumbleButton.Text = "Jumble Mode"
+jumbleButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+jumbleButton.TextSize = 14
+jumbleButton.LayoutOrder = 2
+
+local searchBoxFrame = Instance.new("Frame")
+searchBoxFrame.Parent = scrollFrame
+searchBoxFrame.BackgroundTransparency = 1
+searchBoxFrame.Size = UDim2.new(1, -10, 0, 30)
+searchBoxFrame.Position = UDim2.new(0, 5, 0, 0)
+searchBoxFrame.LayoutOrder = 2
+
+local searchBox = Instance.new("TextBox")
+searchBox.Parent = searchBoxFrame
+searchBox.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+searchBox.Position = UDim2.new(0, 5, 0, 0)
+searchBox.Size = UDim2.new(1, -10, 1, 0)
+searchBox.Font = Enum.Font.Gotham
+searchBox.Text = ""
+searchBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+searchBox.TextSize = 14
+searchBox.PlaceholderText = "🔍 Search Language..."
+searchBox.PlaceholderColor3 = Color3.fromRGB(150, 150, 150)
+
+local langButtons = {}
+local categoryElements = {}
+local categoryLayoutOrder = 3
+
+for _, categoryData in ipairs(languageCategories) do
+    local headerLabel = Instance.new("TextLabel")
+    headerLabel.Parent = scrollFrame
+    headerLabel.BackgroundTransparency = 1
+    headerLabel.Size = UDim2.new(1, -10, 0, 20)
+    headerLabel.Position = UDim2.new(0, 10, 0, 0)
+    headerLabel.Font = Enum.Font.GothamBold
+    headerLabel.Text = categoryData.Name
+    headerLabel.TextColor3 = Color3.fromRGB(200, 200, 200)
+    headerLabel.TextSize = 14
+    headerLabel.TextXAlignment = Enum.TextXAlignment.Left
+    headerLabel.LayoutOrder = categoryLayoutOrder
+    categoryLayoutOrder += 1
+    
+    local buttonContainer = Instance.new("Frame")
+    buttonContainer.Parent = scrollFrame
+    buttonContainer.BackgroundTransparency = 1
+    buttonContainer.Size = UDim2.new(1, 0, 0, 0)
+    buttonContainer.AutomaticSize = Enum.AutomaticSize.Y
+    buttonContainer.LayoutOrder = categoryLayoutOrder
+    categoryLayoutOrder += 1
+    
+    local gridLayout = Instance.new("UIGridLayout")
+    gridLayout.Parent = buttonContainer
+    gridLayout.CellPadding = UDim2.new(0, 5, 0, 5)
+    gridLayout.CellSize = UDim2.new(0, 90, 0, 30) -- Bigger touch targets
+    gridLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    gridLayout.SortOrder = Enum.SortOrder.Name
+    
+    local sortedLangNames = {}
+    for langName in pairs(categoryData.Languages) do table.insert(sortedLangNames, langName) end
+    table.sort(sortedLangNames)
+    
+    local categoryButtons = {}
+    for _, langName in ipairs(sortedLangNames) do
+        local button = Instance.new("TextButton")
+        button.Name = langName
+        button.Parent = buttonContainer
+        button.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+        button.Font = Enum.Font.Gotham
+        button.Text = langName
+        button.TextColor3 = Color3.fromRGB(255, 255, 255)
+        button.TextSize = 12
+        langButtons[langName] = button
+        categoryButtons[langName] = button
+    end
+    
+    table.insert(categoryElements, {header = headerLabel, container = buttonContainer, buttons = categoryButtons})
+end
+
+--endregion
+
+--region UI Interaction Logic
+local function updateFilter(searchText)
+    local searchTextLower = string.lower(searchText)
+    if searchTextLower == "" then
+        for _, category in ipairs(categoryElements) do
+            category.header.Visible = true
+            category.container.Visible = true
+            for _, button in pairs(category.buttons) do button.Visible = true end
+        end
+        return
+    end
+    
+    for _, category in ipairs(categoryElements) do
+        local anyButtonVisible = false
+        for langName, button in pairs(category.buttons) do
+            if string.find(string.lower(langName), searchTextLower) then
+                button.Visible = true
+                anyButtonVisible = true
+            else
+                button.Visible = false
+            end
+        end
+        category.header.Visible = anyButtonVisible
+        category.container.Visible = anyButtonVisible
+    end
+end
+
+local isExpanded = false
+toggleButton.MouseButton1Click:Connect(function()
+    isExpanded = not isExpanded
+    scrollFrame.Visible = isExpanded
+    if isExpanded then
+        toggleButton.Text = "-"
+        mainFrame.Size = UDim2.new(0, 300, 0, 350)
+        searchBox.Text = ""
+        updateFilter("") 
+    else
+        toggleButton.Text = "+"
+        mainFrame.Size = UDim2.new(0, 300, 0, 35)
+    end
+end)
+
+local function resetButtonColors()
+    for _, button in pairs(langButtons) do button.BackgroundColor3 = Color3.fromRGB(60, 60, 60) end
+    stopButton.BackgroundColor3 = Color3.fromRGB(180, 50, 50)
+    jumbleButton.BackgroundColor3 = Color3.fromRGB(120, 60, 180)
+end
+
+for langName, button in pairs(langButtons) do
+    button.MouseButton1Click:Connect(function()
+        resetButtonColors()
+        button.BackgroundColor3 = Color3.fromRGB(50, 130, 200)
+        isTranslatorActive = true
+        isJumbleActive = false
+        targetLanguage = languages[langName]
+        sys("[TR] Translating outgoing to " .. langName)
+    end)
+end
+
+stopButton.MouseButton1Click:Connect(function()
+    resetButtonColors()
+    isTranslatorActive = false
+    isJumbleActive = false
+    targetLanguage = nil
+    sys("[TR] Translator Disabled.")
+end)
+
+jumbleButton.MouseButton1Click:Connect(function()
+    resetButtonColors()
+    jumbleButton.BackgroundColor3 = Color3.fromRGB(160, 90, 220)
+    isTranslatorActive = false
+    isJumbleActive = true
+    targetLanguage = nil
+    sys("[TR] Jumble Enabled! Have fun.")
+end)
+
+searchBox.Changed:Connect(function() updateFilter(searchBox.Text) end)
+
+sys("[TR] Mobile Translator Loaded!")
+--endregion
